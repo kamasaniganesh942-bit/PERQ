@@ -1,25 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  INITIAL_REGISTERED_ACCOUNTS,
-  validateLoginCredentials,
-  validateRegistration,
-  validatePasswordReset,
   isValidEmailFormat,
+  isValidBlueprintUid,
   getFirstName,
+  validateLoginInput,
+  validateRegistrationInput,
+  validatePasswordResetEmailInput,
+  mapFirebaseAuthError,
 } from './auth.ts';
 
-test('INITIAL_REGISTERED_ACCOUNTS has no hardcoded login accounts', () => {
-  assert.equal(INITIAL_REGISTERED_ACCOUNTS.length, 0);
-  const attempt = validateLoginCredentials(
-    INITIAL_REGISTERED_ACCOUNTS,
-    'unregistered@example.com',
-    'Password123!'
-  );
-  assert.equal(attempt.ok, false);
-});
-
-test('isValidEmailFormat validates email syntax strictly', () => {
+test('isValidEmailFormat validates email syntax and blueprint length bounds strictly', () => {
   assert.equal(isValidEmailFormat('priya@example.com'), true);
   assert.equal(isValidEmailFormat('user.name+tag@domain.co.in'), true);
   assert.equal(isValidEmailFormat('invalid-email'), false);
@@ -27,68 +18,62 @@ test('isValidEmailFormat validates email syntax strictly', () => {
   assert.equal(isValidEmailFormat('@nodomain.com'), false);
 });
 
-test('validateLoginCredentials returns exact error messages and errorField metadata for invalid inputs', () => {
-  const reg = validateRegistration(
-    [],
-    'Rohan Verma',
-    'rohan@example.com',
-    'MyWalletPass99',
-    'MyWalletPass99'
-  );
-  const accounts = reg.updatedAccounts!;
+test('isValidBlueprintUid enforces blueprint UID pattern and length bounds', () => {
+  assert.equal(isValidBlueprintUid('usr_123-ABC'), true);
+  assert.equal(isValidBlueprintUid(''), false);
+  assert.equal(isValidBlueprintUid('invalid space uid'), false);
+  assert.equal(isValidBlueprintUid('a'.repeat(129)), false);
+});
 
-  const emptyEmail = validateLoginCredentials(accounts, '', 'MyWalletPass99');
+test('validateLoginInput validates email and password fields and returns errorField metadata', () => {
+  const emptyEmail = validateLoginInput('', 'MyWalletPass99');
   assert.equal(emptyEmail.ok, false);
   assert.equal(emptyEmail.errorField, 'email');
   assert.equal(emptyEmail.error, 'Please enter a valid email address.');
 
-  const invalidEmail = validateLoginCredentials(accounts, 'not-an-email', 'MyWalletPass99');
+  const invalidEmail = validateLoginInput('not-an-email', 'MyWalletPass99');
   assert.equal(invalidEmail.ok, false);
   assert.equal(invalidEmail.errorField, 'email');
   assert.equal(invalidEmail.error, 'Please enter a valid email address.');
 
-  const emptyPassword = validateLoginCredentials(accounts, 'rohan@example.com', '');
+  const emptyPassword = validateLoginInput('rohan@example.com', '');
   assert.equal(emptyPassword.ok, false);
   assert.equal(emptyPassword.errorField, 'password');
   assert.equal(emptyPassword.error, 'Please enter your password.');
 
-  const unknownUser = validateLoginCredentials(accounts, 'other@example.com', 'MyWalletPass99');
-  assert.equal(unknownUser.ok, false);
-  assert.equal(unknownUser.errorField, 'email');
-  assert.equal(
-    unknownUser.error,
-    'No account found with this email address. Please create an account first.'
-  );
-
-  const wrongPassword = validateLoginCredentials(accounts, 'rohan@example.com', 'WrongPass');
-  assert.equal(wrongPassword.ok, false);
-  assert.equal(wrongPassword.errorField, 'credentials');
-  assert.equal(
-    wrongPassword.error,
-    'Invalid email or password. Please check your details and try again.'
-  );
-
-  const validLogin = validateLoginCredentials(accounts, 'ROHAN@example.com', 'MyWalletPass99');
-  assert.equal(validLogin.ok, true);
-  assert.equal(validLogin.session?.fullName, 'Rohan Verma');
-  assert.equal(validLogin.session?.email, 'rohan@example.com');
+  const valid = validateLoginInput('  ROHAN@Example.com ', 'MyWalletPass99');
+  assert.equal(valid.ok, true);
+  assert.equal(valid.normalizedEmail, 'rohan@example.com');
 });
 
-test('validateRegistration validates all required fields, matching passwords, and prevents duplicates', () => {
-  const emptyName = validateRegistration([], '', 'priya@example.com', 'Secret123!', 'Secret123!');
+test('validateRegistrationInput validates required fields, minimum lengths, and matching passwords', () => {
+  const emptyName = validateRegistrationInput('', 'priya@example.com', 'Secret123!', 'Secret123!');
   assert.equal(emptyName.ok, false);
   assert.equal(emptyName.errorField, 'fullName');
 
-  const badEmail = validateRegistration([], 'Priya Sharma', 'not-an-email', 'Secret123!', 'Secret123!');
+  const shortName = validateRegistrationInput('A', 'priya@example.com', 'Secret123!', 'Secret123!');
+  assert.equal(shortName.ok, false);
+  assert.equal(shortName.errorField, 'fullName');
+
+  const badEmail = validateRegistrationInput(
+    'Priya Sharma',
+    'not-an-email',
+    'Secret123!',
+    'Secret123!'
+  );
   assert.equal(badEmail.ok, false);
   assert.equal(badEmail.errorField, 'email');
 
-  const shortPass = validateRegistration([], 'Priya Sharma', 'priya@example.com', '123', '123');
+  const shortPass = validateRegistrationInput(
+    'Priya Sharma',
+    'priya@example.com',
+    '123',
+    '123'
+  );
   assert.equal(shortPass.ok, false);
   assert.equal(shortPass.errorField, 'password');
 
-  const mismatch = validateRegistration(
-    [],
+  const mismatch = validateRegistrationInput(
     'Priya Sharma',
     'priya@example.com',
     'Secret123!',
@@ -96,56 +81,61 @@ test('validateRegistration validates all required fields, matching passwords, an
   );
   assert.equal(mismatch.ok, false);
   assert.equal(mismatch.errorField, 'confirmPassword');
-  assert.equal(mismatch.updatedAccounts, undefined);
 
-  const valid = validateRegistration(
-    [],
-    'Priya Sharma',
+  const valid = validateRegistrationInput(
+    '  Priya   Sharma ',
     'Priya@Example.com',
     'Secret123!',
     'Secret123!'
   );
   assert.equal(valid.ok, true);
-  assert.equal(valid.account?.email, 'priya@example.com');
-  assert.equal(valid.updatedAccounts?.length, 1);
-
-  const duplicate = validateRegistration(
-    valid.updatedAccounts!,
-    'Priya Sharma',
-    'PRIYA@example.com',
-    'AnotherPass123!',
-    'AnotherPass123!'
-  );
-  assert.equal(duplicate.ok, false);
-  assert.equal(duplicate.errorField, 'email');
+  assert.equal(valid.sanitizedName, 'Priya Sharma');
+  assert.equal(valid.normalizedEmail, 'priya@example.com');
 });
 
-test('validatePasswordReset updates password for existing registered email', () => {
-  const reg = validateRegistration(
-    [],
-    'Ananya Nair',
-    'ananya@example.com',
-    'OldPass123',
-    'OldPass123'
+test('validatePasswordResetEmailInput validates reset email', () => {
+  const bad = validatePasswordResetEmailInput('bad-email');
+  assert.equal(bad.ok, false);
+  assert.equal(bad.errorField, 'email');
+
+  const ok = validatePasswordResetEmailInput('Ananya@Example.com');
+  assert.equal(ok.ok, true);
+  assert.equal(ok.normalizedEmail, 'ananya@example.com');
+});
+
+test('mapFirebaseAuthError maps Firebase Auth error codes accurately', () => {
+  const wrongCreds = mapFirebaseAuthError({ code: 'auth/invalid-credential' }, 'login');
+  assert.equal(wrongCreds.ok, false);
+  assert.equal(wrongCreds.errorField, 'credentials');
+  assert.equal(
+    wrongCreds.error,
+    'Invalid email or password. Please check your details and try again.'
   );
-  const accounts = reg.updatedAccounts!;
 
-  const unknownReset = validatePasswordReset(accounts, 'nobody@example.com', 'NewPass456', 'NewPass456');
-  assert.equal(unknownReset.ok, false);
-  assert.equal(unknownReset.errorField, 'email');
+  const duplicateEmail = mapFirebaseAuthError({ code: 'auth/email-already-in-use' }, 'register');
+  assert.equal(duplicateEmail.ok, false);
+  assert.equal(duplicateEmail.errorField, 'email');
+  assert.equal(
+    duplicateEmail.error,
+    'An account with this email address already exists. Please sign in instead.'
+  );
 
-  const mismatchReset = validatePasswordReset(accounts, 'ananya@example.com', 'NewPass456', 'Mismatch');
-  assert.equal(mismatchReset.ok, false);
-  assert.equal(mismatchReset.errorField, 'confirmPassword');
+  const notFound = mapFirebaseAuthError({ code: 'auth/user-not-found' }, 'login');
+  assert.equal(notFound.ok, false);
+  assert.equal(notFound.errorField, 'email');
+  assert.equal(
+    notFound.error,
+    'No account found with this email address. Please create an account first.'
+  );
 
-  const validReset = validatePasswordReset(accounts, 'ananya@example.com', 'NewPass456', 'NewPass456');
-  assert.equal(validReset.ok, true);
-
-  const oldLogin = validateLoginCredentials(validReset.updatedAccounts!, 'ananya@example.com', 'OldPass123');
-  assert.equal(oldLogin.ok, false);
-
-  const newLogin = validateLoginCredentials(validReset.updatedAccounts!, 'ananya@example.com', 'NewPass456');
-  assert.equal(newLogin.ok, true);
+  const providerDisabled = mapFirebaseAuthError(
+    { code: 'auth/operation-not-allowed' },
+    'register',
+    'round-parity-fw2pc'
+  );
+  assert.equal(providerDisabled.ok, false);
+  assert.equal(providerDisabled.isProviderNotEnabled, true);
+  assert.ok(providerDisabled.error?.includes('round-parity-fw2pc'));
 });
 
 test('getFirstName extracts first name cleanly', () => {

@@ -1,0 +1,99 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Registered PERQ user profile stored in the users collection keyed by Firebase Auth UID.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Authentication user UID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "description": "Full name of the registered user.",
+          "minLength": 2,
+          "maxLength": 120
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Normalized email address of the authenticated user.",
+          "minLength": 5,
+          "maxLength": 254,
+          "pattern": "^[^\\s@]+@[^\\s@]+\\.[^\\s@]{2,}$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the account was first created."
+        },
+        "lastLoginAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the most recent successful sign-in."
+        },
+        "status": {
+          "type": "string",
+          "description": "Account lifecycle status.",
+          "enum": ["active", "suspended"],
+          "minLength": 6,
+          "maxLength": 16
+        }
+      },
+      "required": ["uid", "name", "email", "createdAt", "lastLoginAt", "status"]
+    },
+    "LoginActivity": {
+      "title": "LoginActivity",
+      "description": "Audit record written to the loginActivity collection on every successful user sign-in.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Authentication UID of the user who signed in.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Email address of the user who signed in.",
+          "minLength": 5,
+          "maxLength": 254,
+          "pattern": "^[^\\s@]+@[^\\s@]+\\.[^\\s@]{2,}$"
+        },
+        "loginAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the sign-in event occurred."
+        },
+        "status": {
+          "type": "string",
+          "description": "Outcome of the authentication event.",
+          "enum": ["success"],
+          "minLength": 7,
+          "maxLength": 7
+        }
+      },
+      "required": ["uid", "email", "loginAt", "status"]
+    }
+  },
+  "firestore": {
+    "/users/{uid}": {
+      "schema": {
+        "$ref": "#/entities/UserProfile"
+      },
+      "description": "Stores registered PERQ user profiles keyed by Firebase Authentication UID."
+    },
+    "/loginActivity/{activityId}": {
+      "schema": {
+        "$ref": "#/entities/LoginActivity"
+      },
+      "description": "Stores immutable login activity events for authenticated PERQ users."
+    }
+  }
+}

@@ -8,30 +8,35 @@ import {
   ArrowRight,
   CheckCircle2,
   AlertCircle,
-  KeyRound,
   RotateCcw,
   Loader2,
+  ExternalLink,
 } from 'lucide-react';
 import {
-  UserAccount,
   AuthSession,
   AuthErrorField,
-  validateLoginCredentials,
-  validateRegistration,
-  validatePasswordReset,
+  validateLoginInput,
+  validateRegistrationInput,
+  validatePasswordResetEmailInput,
+  mapFirebaseAuthError,
 } from '../utils/auth';
+import {
+  FIREBASE_PROJECT_ID,
+  registerUserWithEmailAndFirestore,
+  signInUserWithEmailAndFirestore,
+  signInWithGoogleAndFirestore,
+  sendFirebasePasswordReset,
+} from '../firebase';
 import { PerqLogo } from './PerqLogo';
 import { AuthAnimatedBackground } from './AuthAnimatedBackground';
 
 interface AuthViewProps {
-  accounts: UserAccount[];
-  onAccountsUpdated: (updatedAccounts: UserAccount[]) => void;
-  onAuthenticated: (session: AuthSession, updatedAccounts?: UserAccount[]) => void;
+  onRegistrationStateChange?: (isRegistering: boolean) => void;
+  onAuthenticated: (session: AuthSession) => void;
 }
 
 export const AuthView: React.FC<AuthViewProps> = ({
-  accounts,
-  onAccountsUpdated,
+  onRegistrationStateChange,
   onAuthenticated,
 }) => {
   const [mode, setMode] = useState<'login' | 'register' | 'reset'>('login');
@@ -43,8 +48,10 @@ export const AuthView: React.FC<AuthViewProps> = ({
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [error, setError] = useState('');
   const [errorField, setErrorField] = useState<AuthErrorField | undefined>(undefined);
+  const [isProviderNotEnabled, setIsProviderNotEnabled] = useState(false);
   const [successMessage, setSuccessMessage] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isGoogleSubmitting, setIsGoogleSubmitting] = useState(false);
 
   const fullNameInputRef = useRef<HTMLInputElement>(null);
   const emailInputRef = useRef<HTMLInputElement>(null);
@@ -54,13 +61,15 @@ export const AuthView: React.FC<AuthViewProps> = ({
   const clearErrorState = () => {
     if (error) setError('');
     if (errorField) setErrorField(undefined);
+    if (isProviderNotEnabled) setIsProviderNotEnabled(false);
   };
 
   const handleSwitchMode = (nextMode: 'login' | 'register' | 'reset', preserveEmail = false) => {
-    if (isSubmitting) return;
+    if (isSubmitting || isGoogleSubmitting) return;
     setMode(nextMode);
     setError('');
     setErrorField(undefined);
+    setIsProviderNotEnabled(false);
     setSuccessMessage('');
     setPassword('');
     setConfirmPassword('');
@@ -76,13 +85,12 @@ export const AuthView: React.FC<AuthViewProps> = ({
     const targetField = errorField;
     setError('');
     setErrorField(undefined);
+    setIsProviderNotEnabled(false);
     setPassword('');
     if (mode !== 'login') {
       setConfirmPassword('');
     }
 
-    // Keep the entered email address so the user does not have to retype it,
-    // and focus the appropriate field based on the failure reason.
     setTimeout(() => {
       if (targetField === 'fullName' && fullNameInputRef.current) {
         fullNameInputRef.current.focus();
@@ -98,82 +106,146 @@ export const AuthView: React.FC<AuthViewProps> = ({
     }, 0);
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (isSubmitting) return;
-
-    setIsSubmitting(true);
+  const handleGoogleSignIn = async () => {
+    if (isSubmitting || isGoogleSubmitting) return;
+    setIsGoogleSubmitting(true);
     setError('');
     setErrorField(undefined);
+    setIsProviderNotEnabled(false);
     setSuccessMessage('');
 
     try {
-      if (mode === 'login') {
-        const result = validateLoginCredentials(accounts, email, password);
-        if (!result.ok || !result.session) {
-          setError(
-            result.error ||
-              'Invalid email or password. Please check your details and try again.'
-          );
-          setErrorField(result.errorField || 'credentials');
-          return;
-        }
-        onAuthenticated(result.session);
+      const profile = await signInWithGoogleAndFirestore();
+      onAuthenticated({
+        uid: profile.uid,
+        fullName: profile.name,
+        email: profile.email,
+        status: 'active',
+        lastLoginAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      const mapped = mapFirebaseAuthError(err, 'login', FIREBASE_PROJECT_ID);
+      setError(
+        mapped.error || 'Google Sign-In could not be completed. Please try again.'
+      );
+      setErrorField(mapped.errorField || 'credentials');
+      setIsProviderNotEnabled(Boolean(mapped.isProviderNotEnabled));
+    } finally {
+      setIsGoogleSubmitting(false);
+    }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isSubmitting || isGoogleSubmitting) return;
+
+    setError('');
+    setErrorField(undefined);
+    setIsProviderNotEnabled(false);
+    setSuccessMessage('');
+
+    if (mode === 'login') {
+      const validation = validateLoginInput(email, password);
+      if (!validation.ok) {
+        setError(
+          validation.error ||
+            'Invalid email or password. Please check your details and try again.'
+        );
+        setErrorField(validation.errorField || 'credentials');
         return;
       }
 
-      if (mode === 'register') {
-        const result = validateRegistration(
-          accounts,
+      setIsSubmitting(true);
+      try {
+        const profile = await signInUserWithEmailAndFirestore(email, password);
+        onAuthenticated({
+          uid: profile.uid,
+          fullName: profile.name,
+          email: profile.email,
+          status: 'active',
+          lastLoginAt: new Date().toISOString(),
+        });
+      } catch (err) {
+        const mapped = mapFirebaseAuthError(err, 'login', FIREBASE_PROJECT_ID);
+        setError(
+          mapped.error ||
+            'Invalid email or password. Please check your details and try again.'
+        );
+        setErrorField(mapped.errorField || 'credentials');
+        setIsProviderNotEnabled(Boolean(mapped.isProviderNotEnabled));
+      } finally {
+        setIsSubmitting(false);
+      }
+      return;
+    }
+
+    if (mode === 'register') {
+      const validation = validateRegistrationInput(
+        fullName,
+        email,
+        password,
+        confirmPassword
+      );
+      if (!validation.ok) {
+        setError(validation.error || 'Registration failed. Please check all fields.');
+        setErrorField(validation.errorField);
+        return;
+      }
+
+      setIsSubmitting(true);
+      onRegistrationStateChange?.(true);
+      try {
+        const registered = await registerUserWithEmailAndFirestore(
           fullName,
           email,
-          password,
-          confirmPassword
+          password
         );
-        if (!result.ok || !result.updatedAccounts || !result.account) {
-          setError(result.error || 'Registration failed. Please check all fields.');
-          setErrorField(result.errorField);
-          return;
-        }
-
-        onAccountsUpdated(result.updatedAccounts);
         setMode('login');
-        setEmail(result.account.email);
+        setEmail(registered.email);
         setPassword('');
         setConfirmPassword('');
         setFullName('');
         setSuccessMessage(
-          result.message ||
-            'Account created successfully! Please sign in with your registered email and password.'
+          `Account created for ${registered.email} and saved to Firestore. Please sign in with your password.`
         );
+      } catch (err) {
+        const mapped = mapFirebaseAuthError(err, 'register', FIREBASE_PROJECT_ID);
+        setError(mapped.error || 'Registration failed. Please check all fields.');
+        setErrorField(mapped.errorField || 'email');
+        setIsProviderNotEnabled(Boolean(mapped.isProviderNotEnabled));
+      } finally {
+        onRegistrationStateChange?.(false);
+        setIsSubmitting(false);
+      }
+      return;
+    }
+
+    if (mode === 'reset') {
+      const validation = validatePasswordResetEmailInput(email);
+      if (!validation.ok) {
+        setError(validation.error || 'Please enter a valid email address.');
+        setErrorField(validation.errorField || 'email');
         return;
       }
 
-      if (mode === 'reset') {
-        const result = validatePasswordReset(
-          accounts,
-          email,
-          password,
-          confirmPassword
-        );
-        if (!result.ok || !result.updatedAccounts || !result.account) {
-          setError(result.error || 'Password reset failed.');
-          setErrorField(result.errorField);
-          return;
-        }
-
-        onAccountsUpdated(result.updatedAccounts);
+      setIsSubmitting(true);
+      try {
+        const targetEmail = await sendFirebasePasswordReset(email);
         setMode('login');
-        setEmail(result.account.email);
+        setEmail(targetEmail);
         setPassword('');
         setConfirmPassword('');
         setSuccessMessage(
-          result.message ||
-            'Password updated successfully. Please sign in with your new password.'
+          `Password reset link sent to ${targetEmail}. Check your inbox and sign in with your updated password.`
         );
+      } catch (err) {
+        const mapped = mapFirebaseAuthError(err, 'reset', FIREBASE_PROJECT_ID);
+        setError(mapped.error || 'Password reset failed.');
+        setErrorField(mapped.errorField || 'email');
+        setIsProviderNotEnabled(Boolean(mapped.isProviderNotEnabled));
+      } finally {
+        setIsSubmitting(false);
       }
-    } finally {
-      setIsSubmitting(false);
     }
   };
 
@@ -185,6 +257,8 @@ export const AuthView: React.FC<AuthViewProps> = ({
     error && (errorField === 'password' || errorField === 'credentials')
   );
   const isConfirmPasswordInvalid = Boolean(error && errorField === 'confirmPassword');
+
+  const firebaseAuthConsoleUrl = `https://console.firebase.google.com/project/${FIREBASE_PROJECT_ID}/authentication/providers`;
 
   return (
     <div className="relative min-h-screen bg-[#080808] text-[#FFFFFF] flex flex-col justify-between overflow-x-hidden">
@@ -257,8 +331,8 @@ export const AuthView: React.FC<AuthViewProps> = ({
                 {mode === 'login'
                   ? 'Enter your registered email address and password to access your dashboard.'
                   : mode === 'register'
-                  ? 'Complete all fields below to register your account and sign in to PERQ.'
-                  : 'Enter your registered email address and choose a new password.'}
+                  ? 'Complete all fields below to register your account in Firebase and Cloud Firestore.'
+                  : 'Enter your registered email address to receive a Firebase password reset link.'}
               </p>
             </div>
 
@@ -287,6 +361,28 @@ export const AuthView: React.FC<AuthViewProps> = ({
                     {error}
                   </div>
                 </div>
+
+                {isProviderNotEnabled && (
+                  <div className="p-3 rounded-lg bg-[#080808]/90 border border-[#EF4444]/40 text-[11px] text-[#E5E5E5] space-y-2">
+                    <div className="font-semibold text-[#FFFFFF]">
+                      Action required in Firebase Console ({FIREBASE_PROJECT_ID}):
+                    </div>
+                    <ol className="list-decimal list-inside space-y-1 text-[#B8B8B8]">
+                      <li>Open Firebase Authentication Sign-in providers.</li>
+                      <li>Click <strong className="text-[#FFFFFF]">Email/Password</strong>, toggle <strong className="text-[#FFFFFF]">Enable</strong> on, and click <strong className="text-[#FFFFFF]">Save</strong>.</li>
+                    </ol>
+                    <a
+                      href={firebaseAuthConsoleUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#FFFFFF] underline underline-offset-4 hover:text-[#D4D4D4]"
+                    >
+                      <span>Open Firebase Auth Providers ({FIREBASE_PROJECT_ID})</span>
+                      <ExternalLink className="w-3.5 h-3.5" />
+                    </a>
+                  </div>
+                )}
+
                 <div className="flex items-center justify-end gap-2 pt-1">
                   {error.includes('create an account') && mode === 'login' && (
                     <button
@@ -384,86 +480,77 @@ export const AuthView: React.FC<AuthViewProps> = ({
                 </div>
               </div>
 
-              <div>
-                <div className="flex items-center justify-between mb-1.5">
-                  <label
-                    htmlFor="auth-password-input"
-                    className="block text-xs font-medium text-[#FFFFFF]"
-                  >
-                    {mode === 'reset' ? 'New Password' : 'Password'}
-                  </label>
-                  {mode === 'login' && (
-                    <button
-                      type="button"
-                      onClick={() => handleSwitchMode('reset', true)}
-                      className="text-xs font-medium text-[#B8B8B8] hover:text-[#FFFFFF] underline underline-offset-4 transition-colors cursor-pointer"
+              {mode !== 'reset' && (
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label
+                      htmlFor="auth-password-input"
+                      className="block text-xs font-medium text-[#FFFFFF]"
                     >
-                      Forgot Password?
-                    </button>
-                  )}
-                </div>
-                <div className="relative">
-                  {mode === 'reset' ? (
-                    <KeyRound
-                      className={`w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none ${
-                        isPasswordInvalid ? 'text-[#F87171]' : 'text-[#858585]'
-                      }`}
-                      aria-hidden="true"
-                    />
-                  ) : (
+                      Password
+                    </label>
+                    {mode === 'login' && (
+                      <button
+                        type="button"
+                        onClick={() => handleSwitchMode('reset', true)}
+                        className="text-xs font-medium text-[#B8B8B8] hover:text-[#FFFFFF] underline underline-offset-4 transition-colors cursor-pointer"
+                      >
+                        Forgot Password?
+                      </button>
+                    )}
+                  </div>
+                  <div className="relative">
                     <Lock
                       className={`w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none ${
                         isPasswordInvalid ? 'text-[#F87171]' : 'text-[#858585]'
                       }`}
                       aria-hidden="true"
                     />
-                  )}
-                  <input
-                    ref={passwordInputRef}
-                    id="auth-password-input"
-                    type={showPassword ? 'text' : 'password'}
-                    autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
-                    aria-invalid={isPasswordInvalid}
-                    placeholder={
-                      mode === 'reset'
-                        ? 'Enter new password (min. 6 characters)'
-                        : mode === 'register'
-                        ? 'Create password (min. 6 characters)'
-                        : 'Enter your password'
-                    }
-                    value={password}
-                    onChange={(e) => {
-                      setPassword(e.target.value);
-                      clearErrorState();
-                    }}
-                    className={`w-full rounded-xl bg-[#080808] border pl-10 pr-10 py-2.5 text-sm text-[#FFFFFF] placeholder-[#858585] focus:outline-none transition-colors ${
-                      isPasswordInvalid
-                        ? 'auth-input-error'
-                        : 'border-[#303030] focus:border-[#FFFFFF]'
-                    }`}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowPassword((prev) => !prev)}
-                    aria-label={showPassword ? 'Hide password' : 'Show password'}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 p-1 text-[#858585] hover:text-[#FFFFFF] cursor-pointer"
-                  >
-                    {showPassword ? (
-                      <EyeOff className="w-4 h-4" />
-                    ) : (
-                      <Eye className="w-4 h-4" />
-                    )}
-                  </button>
+                    <input
+                      ref={passwordInputRef}
+                      id="auth-password-input"
+                      type={showPassword ? 'text' : 'password'}
+                      autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
+                      aria-invalid={isPasswordInvalid}
+                      placeholder={
+                        mode === 'register'
+                          ? 'Create password (min. 6 characters)'
+                          : 'Enter your password'
+                      }
+                      value={password}
+                      onChange={(e) => {
+                        setPassword(e.target.value);
+                        clearErrorState();
+                      }}
+                      className={`w-full rounded-xl bg-[#080808] border pl-10 pr-10 py-2.5 text-sm text-[#FFFFFF] placeholder-[#858585] focus:outline-none transition-colors ${
+                        isPasswordInvalid
+                          ? 'auth-input-error'
+                          : 'border-[#303030] focus:border-[#FFFFFF]'
+                      }`}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword((prev) => !prev)}
+                      aria-label={showPassword ? 'Hide password' : 'Show password'}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 p-1 text-[#858585] hover:text-[#FFFFFF] cursor-pointer"
+                    >
+                      {showPassword ? (
+                        <EyeOff className="w-4 h-4" />
+                      ) : (
+                        <Eye className="w-4 h-4" />
+                      )}
+                    </button>
+                  </div>
                 </div>
-              </div>
+              )}
 
-              {(mode === 'register' || mode === 'reset') && (
+              {mode === 'register' && (
                 <div>
                   <label
                     htmlFor="auth-confirm-password-input"
                     className="block text-xs font-medium text-[#FFFFFF] mb-1.5"
                   >
-                    {mode === 'reset' ? 'Confirm New Password' : 'Confirm Password'}
+                    Confirm Password
                   </label>
                   <div className="relative">
                     <Lock
@@ -478,9 +565,7 @@ export const AuthView: React.FC<AuthViewProps> = ({
                       type={showConfirmPassword ? 'text' : 'password'}
                       autoComplete="new-password"
                       aria-invalid={isConfirmPasswordInvalid}
-                      placeholder={
-                        mode === 'reset' ? 'Confirm new password' : 'Confirm your password'
-                      }
+                      placeholder="Confirm your password"
                       value={confirmPassword}
                       onChange={(e) => {
                         setConfirmPassword(e.target.value);
@@ -512,7 +597,7 @@ export const AuthView: React.FC<AuthViewProps> = ({
 
               <button
                 type="submit"
-                disabled={isSubmitting}
+                disabled={isSubmitting || isGoogleSubmitting}
                 data-testid="auth-submit-button"
                 className="w-full inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-[#FFFFFF] hover:bg-[#D4D4D4] disabled:opacity-60 text-xs font-semibold text-[#080808] transition-colors cursor-pointer whitespace-nowrap shrink-0"
               >
@@ -528,13 +613,42 @@ export const AuthView: React.FC<AuthViewProps> = ({
                         ? 'Sign In to PERQ'
                         : mode === 'register'
                         ? 'Create Account'
-                        : 'Update Password'}
+                        : 'Send Reset Link'}
                     </span>
                     <ArrowRight className="w-4 h-4 text-[#080808]" />
                   </>
                 )}
               </button>
             </form>
+
+            {mode !== 'reset' && (
+              <div className="mt-4">
+                <div className="relative flex items-center justify-center my-3">
+                  <div className="border-t border-[#262626] w-full" />
+                  <span className="bg-[#121212] px-3 text-[11px] text-[#858585] whitespace-nowrap">
+                    or continue with Firebase Auth
+                  </span>
+                  <div className="border-t border-[#262626] w-full" />
+                </div>
+
+                <button
+                  type="button"
+                  disabled={isSubmitting || isGoogleSubmitting}
+                  data-testid="auth-google-button"
+                  onClick={handleGoogleSignIn}
+                  className="w-full inline-flex items-center justify-center gap-2.5 px-4 py-2.5 rounded-xl bg-[#1C1C1C] border border-[#303030] hover:bg-[#252525] hover:border-[#FFFFFF] disabled:opacity-60 text-xs font-semibold text-[#FFFFFF] transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  {isGoogleSubmitting ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin text-[#FFFFFF]" />
+                      <span>Connecting to Google...</span>
+                    </>
+                  ) : (
+                    <span>Continue with Google</span>
+                  )}
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Bottom Account Switch Link */}

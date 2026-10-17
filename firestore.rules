@@ -1,0 +1,127 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Pillar 1: Global Default-Deny Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Global Hardened Primitives
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    // Validation Blueprint: UserProfile (/users/{uid})
+    function isValidUserProfile(data) {
+      return data.keys().hasAll(['uid', 'name', 'email', 'createdAt', 'lastLoginAt', 'status']) &&
+        data.keys().hasOnly(['uid', 'name', 'email', 'createdAt', 'lastLoginAt', 'status']) &&
+        data.uid is string &&
+        data.uid.size() >= 1 &&
+        data.uid.size() <= 128 &&
+        data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.uid == request.auth.uid &&
+        data.name is string &&
+        data.name.size() >= 2 &&
+        data.name.size() <= 120 &&
+        data.email is string &&
+        data.email.size() >= 5 &&
+        data.email.size() <= 254 &&
+        data.email.matches('^[^\\s@]+@[^\\s@]+\\.[^\\s@]{2,}$') &&
+        data.createdAt is timestamp &&
+        data.lastLoginAt is timestamp &&
+        data.status is string &&
+        data.status.size() >= 6 &&
+        data.status.size() <= 16 &&
+        (data.status == 'active' || data.status == 'suspended');
+    }
+
+    // Validation Blueprint: LoginActivity (/loginActivity/{activityId})
+    function isValidLoginActivity(data) {
+      return data.keys().hasAll(['uid', 'email', 'loginAt', 'status']) &&
+        data.keys().hasOnly(['uid', 'email', 'loginAt', 'status']) &&
+        data.uid is string &&
+        data.uid.size() >= 1 &&
+        data.uid.size() <= 128 &&
+        data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.uid == request.auth.uid &&
+        data.email is string &&
+        data.email.size() >= 5 &&
+        data.email.size() <= 254 &&
+        data.email.matches('^[^\\s@]+@[^\\s@]+\\.[^\\s@]{2,}$') &&
+        data.loginAt is timestamp &&
+        data.status is string &&
+        data.status.size() == 7 &&
+        data.status == 'success';
+    }
+
+    // Collection: /users/{uid}
+    match /users/{uid} {
+      allow get: if isOwner(uid) && isValidId(uid);
+      allow list: if false;
+
+      allow create: if isOwner(uid) &&
+        isValidId(uid) &&
+        isValidUserProfile(incoming()) &&
+        incoming().uid == uid &&
+        incoming().status == 'active' &&
+        incoming().createdAt == request.time &&
+        incoming().lastLoginAt == request.time;
+
+      allow update: if isOwner(uid) &&
+        isValidId(uid) &&
+        isValidUserProfile(incoming()) &&
+        existing().status != 'suspended' &&
+        incoming().uid == existing().uid &&
+        incoming().email == existing().email &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().lastLoginAt == request.time &&
+        (
+          // Action 1: Record login timestamp update
+          incoming().diff(existing()).affectedKeys().hasOnly(['lastLoginAt']) ||
+          // Action 2: Update display name and/or login timestamp
+          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'lastLoginAt'])
+        );
+
+      allow delete: if false;
+    }
+
+    // Collection: /loginActivity/{activityId}
+    match /loginActivity/{activityId} {
+      allow get: if isSignedIn() &&
+        isValidId(activityId) &&
+        existing().uid == request.auth.uid;
+
+      allow list: if isSignedIn() &&
+        existing().uid == request.auth.uid;
+
+      allow create: if isSignedIn() &&
+        isValidId(activityId) &&
+        isValidLoginActivity(incoming()) &&
+        incoming().loginAt == request.time &&
+        (
+          exists(/databases/$(database)/documents/users/$(request.auth.uid)) ||
+          existsAfter(/databases/$(database)/documents/users/$(request.auth.uid))
+        );
+
+      allow update: if false;
+      allow delete: if false;
+    }
+  }
+}

@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   LayoutDashboard,
   Wallet,
@@ -14,6 +14,7 @@ import {
   Eye,
   EyeOff,
   LogOut,
+  Loader2,
 } from 'lucide-react';
 import {
   INITIAL_DEMO_CARDS,
@@ -28,14 +29,18 @@ import {
   calculateBillsSummary,
 } from './utils/finance';
 import {
-  UserAccount,
   AuthSession,
-  loadRegisteredAccounts,
-  saveRegisteredAccounts,
-  loadPersistedSession,
-  savePersistedSession,
-  clearPersistedSession,
+  FirestoreUserProfileRecord,
+  FirestoreLoginActivityRecord,
+  clearLegacyLocalStorageAuth,
 } from './utils/auth';
+import {
+  auth,
+  onAuthStateChanged,
+  signOutFromFirebase,
+  subscribeToUserProfile,
+  subscribeToUserLoginActivity,
+} from './firebase';
 import { PerqLogo } from './components/PerqLogo';
 import { AuthView } from './components/AuthView';
 import { DashboardView, NavTab } from './components/DashboardView';
@@ -60,11 +65,11 @@ const NAV_ITEMS: {
 ];
 
 export default function App() {
-  const [accounts, setAccounts] = useState<UserAccount[]>(() => loadRegisteredAccounts());
-  const [authSession, setAuthSession] = useState<AuthSession | null>(() => {
-    const storedAccounts = loadRegisteredAccounts();
-    return loadPersistedSession(storedAccounts);
-  });
+  const [authReady, setAuthReady] = useState<boolean>(false);
+  const [authSession, setAuthSession] = useState<AuthSession | null>(null);
+  const [userProfile, setUserProfile] = useState<FirestoreUserProfileRecord | null>(null);
+  const [loginActivities, setLoginActivities] = useState<FirestoreLoginActivityRecord[]>([]);
+  const isRegisteringRef = useRef<boolean>(false);
 
   const [activeTab, setActiveTab] = useState<NavTab>('home');
   const [cards, setCards] = useState<DemoCard[]>(INITIAL_DEMO_CARDS);
@@ -86,34 +91,105 @@ export default function App() {
     amount: '2500.00',
   });
 
-  const handleAccountsUpdated = (updatedAccounts: UserAccount[]) => {
-    setAccounts(updatedAccounts);
-    saveRegisteredAccounts(updatedAccounts);
-  };
+  // Purge any legacy localStorage password keys on startup and subscribe to Firebase Auth
+  useEffect(() => {
+    clearLegacyLocalStorageAuth();
 
-  const handleAuthenticated = (
-    session: AuthSession,
-    updatedAccounts?: UserAccount[]
-  ) => {
-    if (updatedAccounts) {
-      setAccounts(updatedAccounts);
-      saveRegisteredAccounts(updatedAccounts);
+    const unsubscribeAuth = onAuthStateChanged(auth, (firebaseUser) => {
+      if (isRegisteringRef.current) {
+        return;
+      }
+
+      if (firebaseUser && firebaseUser.email) {
+        const userUid = firebaseUser.uid;
+        const userEmail = firebaseUser.email.toLowerCase();
+        const fallbackDisplayName =
+          firebaseUser.displayName || userEmail.split('@')[0] || 'PERQ Member';
+        setAuthSession((prev) => ({
+          uid: userUid,
+          fullName:
+            prev?.uid === userUid && prev.fullName
+              ? prev.fullName
+              : fallbackDisplayName,
+          email: userEmail,
+          status: 'active',
+        }));
+      } else {
+        setAuthSession(null);
+        setUserProfile(null);
+        setLoginActivities([]);
+      }
+      setAuthReady(true);
+    });
+
+    return () => unsubscribeAuth();
+  }, []);
+
+  // Subscribe to real Firestore `users/{uid}` and `loginActivity` records when authenticated
+  useEffect(() => {
+    if (!authReady || !authSession?.uid || isRegisteringRef.current) {
+      return;
     }
-    setAuthSession(session);
-    savePersistedSession(session);
+
+    const unsubProfile = subscribeToUserProfile(authSession.uid, (profile) => {
+      setUserProfile(profile);
+      if (profile) {
+        setAuthSession((prev) =>
+          prev
+            ? {
+                ...prev,
+                fullName: profile.name || prev.fullName,
+                email: profile.email || prev.email,
+                status: profile.status,
+                createdAt: profile.createdAt,
+                lastLoginAt: profile.lastLoginAt,
+              }
+            : null
+        );
+      }
+    });
+
+    const unsubActivity = subscribeToUserLoginActivity(authSession.uid, (records) => {
+      setLoginActivities(records);
+    });
+
+    return () => {
+      unsubProfile();
+      unsubActivity();
+    };
+  }, [authReady, authSession?.uid]);
+
+  const handleRegistrationStateChange = (isRegistering: boolean) => {
+    isRegisteringRef.current = isRegistering;
   };
 
-  const handleSignOut = () => {
-    clearPersistedSession();
-    setAuthSession(null);
+  const handleAuthenticated = (session: AuthSession) => {
+    setAuthSession(session);
   };
+
+  const handleSignOut = async () => {
+    await signOutFromFirebase();
+    setAuthSession(null);
+    setUserProfile(null);
+    setLoginActivities([]);
+  };
+
+  if (!authReady) {
+    return (
+      <div className="min-h-screen bg-[#080808] text-[#FFFFFF] flex items-center justify-center">
+        <div className="flex items-center gap-3 text-xs text-[#B8B8B8]">
+          <Loader2 className="w-4 h-4 animate-spin text-[#FFFFFF]" />
+          <span>Connecting to PERQ Firebase Authentication...</span>
+        </div>
+      </div>
+    );
+  }
 
   // Secure the application entry point when not authenticated
   if (!authSession) {
     return (
       <AuthView
-        accounts={accounts}
-        onAccountsUpdated={handleAccountsUpdated}
+        onRegistrationStateChange={handleRegistrationStateChange}
         onAuthenticated={handleAuthenticated}
       />
     );
@@ -236,7 +312,7 @@ export default function App() {
           })}
         </nav>
 
-        {/* Signed-In User & Prototype Status Box in Sidebar Footer */}
+        {/* Signed-In User & Firestore Profile Status Box in Sidebar Footer */}
         <div className="p-4 m-3 rounded-xl bg-[#151515] border border-[#303030] space-y-3">
           <div className="flex items-center justify-between gap-2">
             <div className="min-w-0">
@@ -244,13 +320,13 @@ export default function App() {
                 data-testid="sidebar-user-fullname"
                 className="text-xs font-semibold text-[#FFFFFF] truncate"
               >
-                {authSession.fullName}
+                {userProfile?.name || authSession.fullName}
               </div>
               <div
                 data-testid="sidebar-user-email"
                 className="text-[11px] text-[#858585] truncate"
               >
-                {authSession.email}
+                {userProfile?.email || authSession.email}
               </div>
             </div>
             <button
@@ -265,11 +341,14 @@ export default function App() {
           </div>
 
           <div className="pt-2.5 border-t border-[#303030]">
-            <div className="text-[11px] font-semibold text-[#FFFFFF]">
-              My Account
+            <div className="flex items-center justify-between text-[11px] font-semibold text-[#FFFFFF]">
+              <span>My Account</span>
+              <span className="font-mono-tabular text-[10px] text-[#B8B8B8]">
+                {loginActivities.length} login{loginActivities.length === 1 ? '' : 's'}
+              </span>
             </div>
             <p className="text-[10px] text-[#858585] mt-0.5 leading-relaxed">
-              Simulated bank-inspired card profiles and illustrative financial data.
+              Firebase Auth &amp; Cloud Firestore synced ({userProfile?.status || 'active'}).
             </p>
           </div>
         </div>
@@ -326,7 +405,9 @@ export default function App() {
         <main className="flex-1 w-full max-w-[1240px] mx-auto px-4 sm:px-8 py-6 sm:py-8">
           {activeTab === 'home' && (
             <DashboardView
-              userFullName={authSession.fullName}
+              userFullName={userProfile?.name || authSession.fullName}
+              userProfile={userProfile}
+              loginActivities={loginActivities}
               cards={cards}
               selectedCard={selectedCard}
               onSelectCard={(card) => setSelectedCardId(card.id)}
@@ -342,7 +423,7 @@ export default function App() {
 
           {activeTab === 'wallet' && (
             <WalletView
-              userFullName={authSession.fullName}
+              userFullName={userProfile?.name || authSession.fullName}
               cards={cards}
               selectedCard={selectedCard}
               onSelectCard={(card) => setSelectedCardId(card.id)}
@@ -402,7 +483,7 @@ export default function App() {
             <strong className="text-[#FFFFFF] font-semibold">PERQ</strong> — Smarter Cards. Bigger Rewards.
           </div>
           <div>
-            Interactive Fintech Workspace · Simulated card profiles &amp; illustrative financial data · Not a bank or payment provider.
+            Interactive Fintech Workspace · Firebase Auth &amp; Cloud Firestore Connected
           </div>
         </footer>
       </div>
@@ -434,7 +515,7 @@ export default function App() {
         })}
       </nav>
 
-      {/* Add Demo Card Modal */}
+      {/* Add Card Modal */}
       <AddCardModal
         isOpen={isAddCardOpen}
         onClose={() => setIsAddCardOpen(false)}

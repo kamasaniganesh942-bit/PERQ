@@ -9,6 +9,7 @@ import {
   CalendarClock,
   ArrowUpRight,
   MapPin,
+  ShieldCheck,
 } from 'lucide-react';
 import {
   DemoCard,
@@ -20,7 +21,11 @@ import {
   calculateBillsSummary,
   formatINR,
 } from '../utils/finance';
-import { getFirstName } from '../utils/auth';
+import {
+  FirestoreUserProfileRecord,
+  FirestoreLoginActivityRecord,
+  getFirstName,
+} from '../utils/auth';
 import { BankCardVisual } from './BankCardVisual';
 import { CardStudio3D } from './CardStudio3D';
 
@@ -28,6 +33,8 @@ export type NavTab = 'home' | 'wallet' | 'smart-pick' | 'expenses' | 'offers' | 
 
 interface DashboardViewProps {
   userFullName?: string;
+  userProfile?: FirestoreUserProfileRecord | null;
+  loginActivities?: FirestoreLoginActivityRecord[];
   cards: DemoCard[];
   selectedCard: DemoCard;
   onSelectCard: (card: DemoCard) => void;
@@ -40,8 +47,20 @@ interface DashboardViewProps {
   onNavigate: (tab: NavTab) => void;
 }
 
+function formatReadableTimestamp(iso?: string): string {
+  if (!iso) return '—';
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  return date.toLocaleString('en-IN', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  });
+}
+
 export const DashboardView: React.FC<DashboardViewProps> = ({
   userFullName = 'Cardholder',
+  userProfile = null,
+  loginActivities = [],
   cards,
   selectedCard,
   onSelectCard,
@@ -56,7 +75,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const totalBalance = calculateTotalWalletBalance(cards);
   const expenseSummary = calculateExpenseSummary(transactions);
   const billsSummary = calculateBillsSummary(bills);
-  const firstName = getFirstName(userFullName);
+  const firstName = getFirstName(userProfile?.name || userFullName);
 
   return (
     <div className="space-y-8">
@@ -227,7 +246,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           selectedCard={selectedCard}
           hideBalances={hideBalances}
           onSelectCard={onSelectCard}
-          cardholderName={userFullName}
+          cardholderName={userProfile?.name || userFullName}
           compact
         />
       </section>
@@ -345,6 +364,107 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
         </section>
       </div>
+
+      {/* Firestore User Profile & Login Activity Panel */}
+      <section
+        data-testid="firestore-account-activity-section"
+        className="rounded-2xl bg-[#151515] border border-[#303030] p-6"
+      >
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-[#303030]">
+          <div className="flex items-center gap-2.5">
+            <ShieldCheck className="w-4 h-4 text-[#FFFFFF]" />
+            <div>
+              <h2 className="text-base font-bold text-[#FFFFFF]">
+                Account Profile &amp; Login Activity (Cloud Firestore)
+              </h2>
+              <p className="text-xs text-[#B8B8B8] mt-0.5">
+                Live records synced from the <code className="text-[#FFFFFF]">users</code> and <code className="text-[#FFFFFF]">loginActivity</code> Firestore collections
+              </p>
+            </div>
+          </div>
+          {userProfile && (
+            <span className="font-mono-tabular text-xs text-[#B8B8B8]">
+              Status: <strong className="text-[#FFFFFF] uppercase">{userProfile.status}</strong>
+            </span>
+          )}
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 pt-4">
+          <div className="space-y-2.5 text-xs">
+            <div className="text-[#858585] font-semibold uppercase tracking-wider text-[11px]">
+              Registered Profile (users/{userProfile?.uid || '—'})
+            </div>
+            <div className="rounded-xl bg-[#080808] border border-[#303030] p-4 space-y-2">
+              <div className="flex items-center justify-between gap-4">
+                <span className="text-[#858585]">UID</span>
+                <span className="font-mono-tabular text-[#FFFFFF] truncate max-w-[240px]">
+                  {userProfile?.uid || '—'}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-4">
+                <span className="text-[#858585]">Name</span>
+                <span className="text-[#FFFFFF] font-medium">
+                  {userProfile?.name || userFullName}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-4">
+                <span className="text-[#858585]">Email</span>
+                <span className="text-[#FFFFFF]">
+                  {userProfile?.email || '—'}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-4">
+                <span className="text-[#858585]">Created At</span>
+                <span className="font-mono-tabular text-[#B8B8B8]">
+                  {formatReadableTimestamp(userProfile?.createdAt)}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-4">
+                <span className="text-[#858585]">Last Login At</span>
+                <span className="font-mono-tabular text-[#FFFFFF]">
+                  {formatReadableTimestamp(userProfile?.lastLoginAt)}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-2.5 text-xs">
+            <div className="text-[#858585] font-semibold uppercase tracking-wider text-[11px]">
+              Recent Sign-In Events (loginActivity · {loginActivities.length})
+            </div>
+            <div className="rounded-xl bg-[#080808] border border-[#303030] divide-y divide-[#262626]">
+              {loginActivities.slice(0, 4).map((item) => (
+                <div
+                  key={item.id}
+                  className="px-4 py-3 flex items-center justify-between gap-4"
+                >
+                  <div className="min-w-0">
+                    <div className="text-[#FFFFFF] font-medium truncate">
+                      {item.email}
+                    </div>
+                    <div className="font-mono-tabular text-[11px] text-[#858585] truncate">
+                      UID: {item.uid}
+                    </div>
+                  </div>
+                  <div className="text-right shrink-0">
+                    <div className="font-mono-tabular text-[#FFFFFF]">
+                      {formatReadableTimestamp(item.loginAt)}
+                    </div>
+                    <div className="text-[11px] text-[#B8B8B8] uppercase">
+                      {item.status}
+                    </div>
+                  </div>
+                </div>
+              ))}
+              {loginActivities.length === 0 && (
+                <div className="p-4 text-center text-[#858585]">
+                  No login events recorded yet for this account.
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </section>
     </div>
   );
 };

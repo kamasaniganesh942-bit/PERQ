@@ -1,16 +1,27 @@
-export interface UserAccount {
-  id: string;
+export interface AuthSession {
+  uid: string;
   fullName: string;
   email: string;
-  password: string;
-  createdAt: string;
+  status: 'active' | 'suspended';
+  createdAt?: string;
+  lastLoginAt?: string;
 }
 
-export interface AuthSession {
-  userId: string;
-  fullName: string;
+export interface FirestoreUserProfileRecord {
+  uid: string;
+  name: string;
   email: string;
-  signedInAt?: string;
+  createdAt: string;
+  lastLoginAt: string;
+  status: 'active' | 'suspended';
+}
+
+export interface FirestoreLoginActivityRecord {
+  id: string;
+  uid: string;
+  email: string;
+  loginAt: string;
+  status: 'success';
 }
 
 export type AuthErrorField =
@@ -24,24 +35,64 @@ export interface AuthValidationResult {
   ok: boolean;
   error?: string;
   errorField?: AuthErrorField;
-  message?: string;
-  session?: AuthSession;
-  account?: UserAccount;
-  updatedAccounts?: UserAccount[];
+  errorCode?: string;
+  isProviderNotEnabled?: boolean;
+  normalizedEmail?: string;
+  sanitizedName?: string;
 }
 
-export const ACCOUNTS_STORAGE_KEY = 'perq_registered_accounts_v2';
-export const SESSION_STORAGE_KEY = 'perq_active_session_v2';
+// Verbatim constants & regexes synchronized with firebase-blueprint.json
+export const BLUEPRINT_UID_MIN_LEN = 1;
+export const BLUEPRINT_UID_MAX_LEN = 128;
+export const BLUEPRINT_UID_REGEX = /^[a-zA-Z0-9_\-]+$/;
 
-export const INITIAL_REGISTERED_ACCOUNTS: UserAccount[] = [];
+export const BLUEPRINT_NAME_MIN_LEN = 2;
+export const BLUEPRINT_NAME_MAX_LEN = 120;
+
+export const BLUEPRINT_EMAIL_MIN_LEN = 5;
+export const BLUEPRINT_EMAIL_MAX_LEN = 254;
+export const BLUEPRINT_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
+const LEGACY_ACCOUNTS_STORAGE_KEY = 'perq_registered_accounts_v2';
+const LEGACY_SESSION_STORAGE_KEY = 'perq_active_session_v2';
+
+/**
+ * Purges any legacy local storage keys so plain-text passwords are never stored in browser storage.
+ */
+export function clearLegacyLocalStorageAuth(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.removeItem(LEGACY_ACCOUNTS_STORAGE_KEY);
+    window.localStorage.removeItem(LEGACY_SESSION_STORAGE_KEY);
+  } catch {
+    // Ignore storage access errors in restricted environments
+  }
+}
 
 export function normalizeEmail(email: string): string {
-  return email.trim().toLowerCase();
+  return email.trim().toLowerCase().slice(0, BLUEPRINT_EMAIL_MAX_LEN);
+}
+
+export function sanitizeFullName(name: string): string {
+  return name.trim().replace(/\s+/g, ' ').slice(0, BLUEPRINT_NAME_MAX_LEN);
 }
 
 export function isValidEmailFormat(email: string): boolean {
-  const clean = normalizeEmail(email);
-  return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(clean);
+  const clean = email.trim().toLowerCase();
+  return (
+    clean.length >= BLUEPRINT_EMAIL_MIN_LEN &&
+    clean.length <= BLUEPRINT_EMAIL_MAX_LEN &&
+    BLUEPRINT_EMAIL_REGEX.test(clean)
+  );
+}
+
+export function isValidBlueprintUid(uid: string): boolean {
+  return (
+    typeof uid === 'string' &&
+    uid.length >= BLUEPRINT_UID_MIN_LEN &&
+    uid.length <= BLUEPRINT_UID_MAX_LEN &&
+    BLUEPRINT_UID_REGEX.test(uid)
+  );
 }
 
 export function getFirstName(fullName: string): string {
@@ -50,27 +101,20 @@ export function getFirstName(fullName: string): string {
   return clean.split(/\s+/)[0];
 }
 
-export function validateLoginCredentials(
-  accounts: UserAccount[],
+export function validateLoginInput(
   emailInput: string,
   passwordInput: string
 ): AuthValidationResult {
   const email = normalizeEmail(emailInput);
 
-  if (!email) {
+  if (!email || !isValidEmailFormat(email)) {
     return {
       ok: false,
       errorField: 'email',
       error: 'Please enter a valid email address.',
     };
   }
-  if (!isValidEmailFormat(email)) {
-    return {
-      ok: false,
-      errorField: 'email',
-      error: 'Please enter a valid email address.',
-    };
-  }
+
   if (!passwordInput) {
     return {
       ok: false,
@@ -79,42 +123,19 @@ export function validateLoginCredentials(
     };
   }
 
-  const matched = accounts.find((acc) => normalizeEmail(acc.email) === email);
-  if (!matched) {
-    return {
-      ok: false,
-      errorField: 'email',
-      error: 'No account found with this email address. Please create an account first.',
-    };
-  }
-
-  if (matched.password !== passwordInput) {
-    return {
-      ok: false,
-      errorField: 'credentials',
-      error: 'Invalid email or password. Please check your details and try again.',
-    };
-  }
-
   return {
     ok: true,
-    session: {
-      userId: matched.id,
-      fullName: matched.fullName,
-      email: matched.email,
-      signedInAt: new Date().toISOString(),
-    },
+    normalizedEmail: email,
   };
 }
 
-export function validateRegistration(
-  accounts: UserAccount[],
+export function validateRegistrationInput(
   fullNameInput: string,
   emailInput: string,
   passwordInput: string,
   confirmPasswordInput: string
 ): AuthValidationResult {
-  const fullName = fullNameInput.trim();
+  const fullName = sanitizeFullName(fullNameInput);
   const email = normalizeEmail(emailInput);
 
   if (!fullName) {
@@ -124,27 +145,23 @@ export function validateRegistration(
       error: 'Please enter your full name.',
     };
   }
-  if (fullName.length < 2) {
+
+  if (fullName.length < BLUEPRINT_NAME_MIN_LEN) {
     return {
       ok: false,
       errorField: 'fullName',
-      error: 'Full name must be at least 2 characters long.',
+      error: `Full name must be at least ${BLUEPRINT_NAME_MIN_LEN} characters long.`,
     };
   }
-  if (!email) {
+
+  if (!email || !isValidEmailFormat(email)) {
     return {
       ok: false,
       errorField: 'email',
       error: 'Please enter a valid email address.',
     };
   }
-  if (!isValidEmailFormat(email)) {
-    return {
-      ok: false,
-      errorField: 'email',
-      error: 'Please enter a valid email address.',
-    };
-  }
+
   if (!passwordInput) {
     return {
       ok: false,
@@ -152,6 +169,7 @@ export function validateRegistration(
       error: 'Please enter your password.',
     };
   }
+
   if (passwordInput.length < 6) {
     return {
       ok: false,
@@ -159,6 +177,7 @@ export function validateRegistration(
       error: 'Password must be at least 6 characters long.',
     };
   }
+
   if (!confirmPasswordInput) {
     return {
       ok: false,
@@ -166,6 +185,7 @@ export function validateRegistration(
       error: 'Please confirm your password.',
     };
   }
+
   if (passwordInput !== confirmPasswordInput) {
     return {
       ok: false,
@@ -174,188 +194,142 @@ export function validateRegistration(
     };
   }
 
-  const exists = accounts.some((acc) => normalizeEmail(acc.email) === email);
-  if (exists) {
+  return {
+    ok: true,
+    normalizedEmail: email,
+    sanitizedName: fullName,
+  };
+}
+
+export function validatePasswordResetEmailInput(emailInput: string): AuthValidationResult {
+  const email = normalizeEmail(emailInput);
+  if (!email || !isValidEmailFormat(email)) {
     return {
       ok: false,
+      errorField: 'email',
+      error: 'Please enter a valid email address to receive a password reset link.',
+    };
+  }
+
+  return {
+    ok: true,
+    normalizedEmail: email,
+  };
+}
+
+export function mapFirebaseAuthError(
+  error: unknown,
+  mode: 'login' | 'register' | 'reset',
+  projectId = 'round-parity-fw2pc'
+): AuthValidationResult {
+  const code =
+    typeof error === 'object' && error !== null && 'code' in error
+      ? String((error as { code?: unknown }).code)
+      : '';
+  const rawMessage =
+    error instanceof Error ? error.message : String(error || 'Authentication failed');
+
+  if (
+    code === 'auth/operation-not-allowed' ||
+    rawMessage.includes('OPERATION_NOT_ALLOWED') ||
+    rawMessage.includes('auth/operation-not-allowed')
+  ) {
+    return {
+      ok: false,
+      errorCode: 'auth/operation-not-allowed',
+      errorField: 'credentials',
+      isProviderNotEnabled: true,
+      error: `Email/Password sign-in is not yet enabled in Firebase Console for project "${projectId}". Enable the Email/Password provider in Firebase Authentication → Sign-in method, or use Continue with Google below.`,
+    };
+  }
+
+  if (code === 'auth/email-already-in-use' || rawMessage.includes('EMAIL_EXISTS')) {
+    return {
+      ok: false,
+      errorCode: 'auth/email-already-in-use',
       errorField: 'email',
       error: 'An account with this email address already exists. Please sign in instead.',
     };
   }
 
-  const newAccount: UserAccount = {
-    id: `usr-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-    fullName,
-    email,
-    password: passwordInput,
-    createdAt: new Date().toISOString().slice(0, 10),
-  };
-
-  return {
-    ok: true,
-    message: `Account created successfully for ${newAccount.email}. Please sign in with your password.`,
-    account: newAccount,
-    session: {
-      userId: newAccount.id,
-      fullName: newAccount.fullName,
-      email: newAccount.email,
-      signedInAt: new Date().toISOString(),
-    },
-    updatedAccounts: [...accounts, newAccount],
-  };
-}
-
-export function validatePasswordReset(
-  accounts: UserAccount[],
-  emailInput: string,
-  newPasswordInput: string,
-  confirmPasswordInput: string
-): AuthValidationResult {
-  const email = normalizeEmail(emailInput);
-
-  if (!email) {
+  if (code === 'auth/invalid-email' || rawMessage.includes('INVALID_EMAIL')) {
     return {
       ok: false,
+      errorCode: 'auth/invalid-email',
       errorField: 'email',
       error: 'Please enter a valid email address.',
     };
   }
-  if (!isValidEmailFormat(email)) {
+
+  if (code === 'auth/weak-password' || rawMessage.includes('WEAK_PASSWORD')) {
     return {
       ok: false,
-      errorField: 'email',
-      error: 'Please enter a valid email address.',
-    };
-  }
-  if (!newPasswordInput) {
-    return {
-      ok: false,
+      errorCode: 'auth/weak-password',
       errorField: 'password',
-      error: 'Please enter a new password.',
-    };
-  }
-  if (newPasswordInput.length < 6) {
-    return {
-      ok: false,
-      errorField: 'password',
-      error: 'New password must be at least 6 characters long.',
-    };
-  }
-  if (!confirmPasswordInput) {
-    return {
-      ok: false,
-      errorField: 'confirmPassword',
-      error: 'Please confirm your new password.',
-    };
-  }
-  if (newPasswordInput !== confirmPasswordInput) {
-    return {
-      ok: false,
-      errorField: 'confirmPassword',
-      error: 'New passwords do not match.',
+      error: 'Password is too weak. Please choose a password with at least 6 characters.',
     };
   }
 
-  const accountIndex = accounts.findIndex((acc) => normalizeEmail(acc.email) === email);
-  if (accountIndex === -1) {
+  if (code === 'auth/user-not-found' || rawMessage.includes('EMAIL_NOT_FOUND')) {
     return {
       ok: false,
+      errorCode: 'auth/user-not-found',
       errorField: 'email',
       error: 'No account found with this email address. Please create an account first.',
     };
   }
 
-  const updatedAccount: UserAccount = {
-    ...accounts[accountIndex],
-    password: newPasswordInput,
-  };
+  if (
+    code === 'auth/wrong-password' ||
+    code === 'auth/invalid-credential' ||
+    code === 'auth/invalid-login-credentials' ||
+    rawMessage.includes('INVALID_LOGIN_CREDENTIALS') ||
+    rawMessage.includes('INVALID_PASSWORD')
+  ) {
+    return {
+      ok: false,
+      errorCode: code || 'auth/invalid-credential',
+      errorField: 'credentials',
+      error: 'Invalid email or password. Please check your details and try again.',
+    };
+  }
 
-  const updatedAccounts = accounts.map((acc, idx) =>
-    idx === accountIndex ? updatedAccount : acc
-  );
+  if (code === 'auth/user-disabled' || rawMessage.includes('USER_DISABLED')) {
+    return {
+      ok: false,
+      errorCode: 'auth/user-disabled',
+      errorField: 'email',
+      error: 'This account has been suspended. Please contact support.',
+    };
+  }
+
+  if (code === 'auth/too-many-requests' || rawMessage.includes('TOO_MANY_ATTEMPTS_TRY_LATER')) {
+    return {
+      ok: false,
+      errorCode: 'auth/too-many-requests',
+      errorField: 'credentials',
+      error: 'Too many failed attempts. Please wait a moment and try again.',
+    };
+  }
+
+  if (code === 'auth/popup-closed-by-user') {
+    return {
+      ok: false,
+      errorCode: 'auth/popup-closed-by-user',
+      errorField: 'credentials',
+      error: 'Google Sign-In window was closed before completing authentication.',
+    };
+  }
 
   return {
-    ok: true,
-    message: 'Password updated successfully. Please sign in with your new password.',
-    account: updatedAccount,
-    updatedAccounts,
+    ok: false,
+    errorCode: code || 'auth/unknown',
+    errorField: mode === 'register' ? 'email' : 'credentials',
+    error:
+      mode === 'login'
+        ? 'Invalid email or password. Please check your details and try again.'
+        : mode === 'register'
+        ? 'Unable to create account right now. Please verify your details and try again.'
+        : 'Unable to send password reset email. Please verify your email address.',
   };
-}
-
-export function loadRegisteredAccounts(): UserAccount[] {
-  if (typeof window === 'undefined') return INITIAL_REGISTERED_ACCOUNTS;
-  try {
-    const raw = window.localStorage.getItem(ACCOUNTS_STORAGE_KEY);
-    if (!raw) return INITIAL_REGISTERED_ACCOUNTS;
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return INITIAL_REGISTERED_ACCOUNTS;
-    return parsed.filter(
-      (item): item is UserAccount =>
-        Boolean(
-          item &&
-            typeof item.id === 'string' &&
-            typeof item.fullName === 'string' &&
-            typeof item.email === 'string' &&
-            typeof item.password === 'string'
-        )
-    );
-  } catch {
-    return INITIAL_REGISTERED_ACCOUNTS;
-  }
-}
-
-export function saveRegisteredAccounts(accounts: UserAccount[]): void {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.setItem(ACCOUNTS_STORAGE_KEY, JSON.stringify(accounts));
-  } catch {
-    // Ignore storage quota errors in restricted environments
-  }
-}
-
-export function loadPersistedSession(accounts: UserAccount[]): AuthSession | null {
-  if (typeof window === 'undefined') return null;
-  try {
-    const raw = window.localStorage.getItem(SESSION_STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as Partial<AuthSession>;
-    if (!parsed || typeof parsed.email !== 'string' || typeof parsed.userId !== 'string') {
-      return null;
-    }
-    const matched = accounts.find(
-      (acc) =>
-        acc.id === parsed.userId ||
-        normalizeEmail(acc.email) === normalizeEmail(parsed.email!)
-    );
-    if (!matched) {
-      window.localStorage.removeItem(SESSION_STORAGE_KEY);
-      return null;
-    }
-    return {
-      userId: matched.id,
-      fullName: matched.fullName,
-      email: matched.email,
-      signedInAt: parsed.signedInAt,
-    };
-  } catch {
-    return null;
-  }
-}
-
-export function savePersistedSession(session: AuthSession): void {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
-  } catch {
-    // Ignore storage errors
-  }
-}
-
-export function clearPersistedSession(): void {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.removeItem(SESSION_STORAGE_KEY);
-  } catch {
-    // Ignore storage errors
-  }
 }
