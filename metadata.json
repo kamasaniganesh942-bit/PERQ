@@ -1,0 +1,6 @@
+{
+  "name": "PERQ",
+  "description": "Smarter Cards. Bigger Rewards. A modern fintech wallet, 3D card studio, reward optimizer, and expense manager.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
